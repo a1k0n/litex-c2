@@ -1,0 +1,4 @@
+[submodule "valentyusb"]
+	path = valentyusb
+	url = https://github.com/gregdavill/valentyusb
+	branch = hw_cdc_eptri
