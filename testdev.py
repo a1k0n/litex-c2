@@ -8,7 +8,6 @@ class TestDevice(Module, AutoCSR):
         txwidth = 12
         txlen = Signal(max=txwidth+1)
         txbuf = Signal(txwidth)
-        txarray = Array([txbuf[i] for i in range(txwidth)])
         rxbuf = Signal(8)
         rxlen = Signal(4)
 
@@ -20,6 +19,7 @@ class TestDevice(Module, AutoCSR):
         self._stat = CSRStatus(8)
         self._rxbuf = CSRStatus(8)
         self.comb += self._rxbuf.status.eq(rxbuf)
+        self._addr = CSRStorage(8)
 
         c2d = TSTriple()
         c2ck = Signal(reset=1)
@@ -32,33 +32,43 @@ class TestDevice(Module, AutoCSR):
         fsm.act("IDLE",
             c2d.oe.eq(0),
             NextValue(c2ck, 1),
-            If(self._cmd.storage == 1,
+            If(self._cmd.storage == 1,  # data read
                 NextValue(self._cmd.storage, 0),
                 # write 00 (data read) 00 (length)
                 NextValue(txbuf, 0),
-                NextValue(txlen, 4),
+                NextValue(txlen, 5),
                 NextValue(rxlen, 8),
                 NextValue(error, 0),
                 NextValue(waitlen, 40),
                 NextState("TX")
-            )
+            ),
+            If(self._cmd.storage == 2,  # address write
+                NextValue(self._cmd.storage, 0),
+                NextValue(txbuf, (self._addr.storage << 3) | 7),
+                NextValue(txlen, 11),
+                NextValue(rxlen, 0),
+                NextValue(error, 0),
+                NextValue(waitlen, 0),
+                NextState("TX")
+            ),
         )
 
         fsm.act("TX",
+            # clk initially 1 here
             c2d.oe.eq(1),
             If(txlen == 0,
                 If(waitlen != 0,
                     NextState("WAITRX"),
-                    NextValue(c2ck, 0),
                 ).Elif(rxlen != 0,
                     NextState("RX"),
-                    NextValue(c2ck, 0),
                 ).Else(
-                    NextState("IDLE")
-                )
+                    NextState("STOP")
+                ),
+                NextValue(c2ck, 0)
             ).Else(
                 If(c2ck == 1,  # clock is high, about to drop the next bit
-                    NextValue(c2d.o, txarray[txlen-1])
+                    NextValue(c2d.o, txbuf[0]),
+                    NextValue(txbuf, txbuf[1:])
                 ).Else(
                     # clock is low, about to raise it and potentially advance to the next state
                     NextValue(txlen, txlen-1)
