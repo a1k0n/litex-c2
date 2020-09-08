@@ -1,55 +1,64 @@
-from migen import Module, TSTriple, Signal, FSM, If, NextState, NextValue
+from migen import Module, TSTriple, Array, Signal, Cat, FSM, If, NextState, NextValue
 from litex.soc.interconnect.csr import AutoCSR, CSRStorage, CSRStatus
 
 
 class TestDevice(Module, AutoCSR):
     def __init__(self, c2):
-        c2ck = c2.c2ck
 
-        txlen = Signal(5)
-        txbuf = Signal(12)
+        txwidth = 12
+        txlen = Signal(max=txwidth+1)
+        txbuf = Signal(txwidth)
+        txarray = Array([txbuf[i] for i in range(txwidth)])
+        rxbuf = Signal(8)
         rxlen = Signal(4)
+
         waitlen = Signal(7)
+        rfull = Signal()
         error = Signal()
 
         self._cmd = CSRStorage(8)
         self._stat = CSRStatus(8)
-        self._rdbuf = CSRStatus(8)
+        self._rxbuf = CSRStatus(8)
+        self.comb += self._rxbuf.status.eq(rxbuf)
 
         c2d = TSTriple()
+        c2ck = Signal(reset=1)
+        self.comb += c2.c2ck.eq(c2ck)
         self.specials += c2d.get_tristate(c2.c2d)
 
         fsm = FSM(reset_state="IDLE")
         self.submodules.fsm = fsm
 
         fsm.act("IDLE",
-                c2d.oe.eq(0),
-                NextValue(c2ck, 1),
-                If(self._cmd.storage == 1,
-                    NextValue(self._cmd.storage, 0),
-                    # write 00 (data read) 00 (length)
-                    NextValue(txbuf, 0),
-                    NextValue(txlen, 4),
-                    NextValue(rxlen, 8),
-                    NextValue(error, 0),
-                    NextValue(waitlen, 40),
-                    NextState("TX")
-                   )
-                )
+            c2d.oe.eq(0),
+            NextValue(c2ck, 1),
+            If(self._cmd.storage == 1,
+                NextValue(self._cmd.storage, 0),
+                # write 00 (data read) 00 (length)
+                NextValue(txbuf, 0),
+                NextValue(txlen, 4),
+                NextValue(rxlen, 8),
+                NextValue(error, 0),
+                NextValue(waitlen, 40),
+                NextState("TX")
+            )
+        )
 
         fsm.act("TX",
             c2d.oe.eq(1),
             If(txlen == 0,
                 If(waitlen != 0,
-                    NextState("WAITRX")
+                    NextState("WAITRX"),
+                    NextValue(c2ck, 0),
                 ).Elif(rxlen != 0,
-                    NextState("RX")
+                    NextState("RX"),
+                    NextValue(c2ck, 0),
                 ).Else(
                     NextState("IDLE")
                 )
             ).Else(
                 If(c2ck == 1,  # clock is high, about to drop the next bit
-                    NextValue(c2d.o, txbuf & 1)
+                    NextValue(c2d.o, txarray[txlen-1])
                 ).Else(
                     # clock is low, about to raise it and potentially advance to the next state
                     NextValue(txlen, txlen-1)
@@ -59,10 +68,11 @@ class TestDevice(Module, AutoCSR):
         )
 
         fsm.act("WAITRX",
+            # must enter state with c2ck already at 0
             c2d.oe.eq(0),
             If((c2ck == 1) & (c2d.i == 1),
                 NextState("RX"),
-                NextValue(c2ck, ~c2ck)
+                NextValue(c2ck, 0)
             ).Else(
                 If(waitlen == 0,
                     NextValue(error, 1),
@@ -75,15 +85,28 @@ class TestDevice(Module, AutoCSR):
         )
 
         fsm.act("RX",
+            # must enter state with c2ck already at 0
             c2d.oe.eq(0),
-            If(rxlen == 0,
+            If(c2ck == 1,  # clock is high, shift in bit as it falls
+                NextValue(rxbuf, Cat(rxbuf[1:], c2d.i)),
+                If(rxlen == 1,
+                    NextValue(rfull, 1),
+                    NextState("STOP")
+                ),
+                NextValue(c2ck, 0),
+                NextValue(rxlen, rxlen - 1),
+            ).Else(
+                NextValue(c2ck, 1)
+            )
+        )
+
+        fsm.act("STOP",
+            # must enter state with c2ck already at 0
+            c2d.oe.eq(0),
+            If(c2ck == 1,  # stop done
                 NextState("IDLE")
             ).Else(
-                If(c2ck == 1, # clock is high, shift in bit
-                    self._rdbuf.status.eq(
-                        (c2d.i << 7) | (self._rdbuf.status >> 1))
-                ),
-                NextValue(c2ck, ~c2ck)
+                NextValue(c2ck, 1)
             )
         )
 
@@ -94,6 +117,7 @@ class TestDevice(Module, AutoCSR):
             (fsm.ongoing("TX") << 1) |
             (fsm.ongoing("RX") << 2) |
             (fsm.ongoing("WAITRX") << 3) | 
+            (rfull << 6) |
             (error << 7))
         
         # for debugging, expose internals
