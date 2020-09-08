@@ -39,6 +39,7 @@ class TestDevice(Module, AutoCSR):
                 NextValue(txlen, 5),
                 NextValue(rxlen, 8),
                 NextValue(error, 0),
+                NextValue(rfull, 0),  # can we reset this on the CSR read?
                 NextValue(waitlen, 40),
                 NextState("TX")
             ),
