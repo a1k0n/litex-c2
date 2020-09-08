@@ -80,39 +80,67 @@ static void reboot(void)
 	ctrl_reset_write(1);
 }
 
-static void puthex(uint8_t x) {
+static void puthex(char *out, uint8_t x) {
   static const char hex[] = "0123456789abcdef";
-  putchar(hex[x>>4]);
-  putchar(hex[x&15]);
+  out[0] = hex[x>>4];
+  out[1] = hex[x&15];
 }
 
 static int dump(void) {
   uint8_t buf[0x80];
+  char sendbuf[0x40];
 
-  for (int i = 0x80; i < 0x100; i++) {
-    c2_addr_write(i);
-    c2_cmd_write(2);  // send address
+  const uint8_t addr0 = 0x80;
+
+  uint8_t addr = addr0;
+  c2_addr_write(addr++);
+  c2_cmd_write(2);  // send address
+  for (int i = 0; i < 0x80; i++) {
     c2_cmd_write(1);  // read data
+    c2_addr_write(addr++);
+    while(c2_cmd_read() != 0);  // wait for read command to get picked up
+    c2_cmd_write(2);  // send address
     // wait for read completion, or error
     for (;;) {
+      // unroll status check loop so we can hit it during the pipelined address write
+      // so that the C2 bus stays nearly 100% active
       uint8_t s = c2_stat_read();
+      if (s & 0x40) break;
+      s = c2_stat_read();
+      if (s & 0x40) break;
+      s = c2_stat_read();
+      if (s & 0x40) break;
+      s = c2_stat_read();
+      if (s & 0x40) break;
       if (s & 0x80) {
         puts("\r\x1b[9B\n***** c.2 error ******");
         return 0;
       }
       if (s & 0x40) break;
     }
-    buf[i-0x80] = c2_rxbuf_read();
+    buf[i] = c2_rxbuf_read();
   }
 
-  for (int i = 0x80; i < 0x100; i++) {
-    puthex(buf[i-0x80]);
+  char *o = sendbuf;
+  for (int i = 0; i < 0x80; i++) {
+    if ((i & 0x0f) == 0) {
+      puthex(o, addr0 + i);
+      o[2] = ':';
+      o[3] = ' ';
+      o += 4;
+    }
+    puthex(o, buf[i]);
+    o[2] = ' ';
     if ((i & 0x0f) == 0x0f) {
-      puts("");
+      o[2] = '\n';
+      o[3] = 0;
+      o = sendbuf;
+      putsnonl(o);
     } else {
-      putsnonl(" ");
+      o += 3;
     }
   }
+
   return 1;
 }
 
