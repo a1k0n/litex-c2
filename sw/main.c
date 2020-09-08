@@ -72,6 +72,7 @@ static void help(void)
 	puts("help                            - this command");
 	puts("reboot                          - reboot CPU");
 	puts("dump                            - dump SFRs");
+	puts("live                            - live dump of SFRs");
 }
 
 static void reboot(void)
@@ -85,22 +86,23 @@ static void puthex(uint8_t x) {
   putchar(hex[x&15]);
 }
 
-static void dump(void) {
+static int dump(void) {
   uint8_t buf[0x80];
 
   for (int i = 0x80; i < 0x100; i++) {
-    testdev_addr_write(i);
-    testdev_cmd_write(2);  // send address
-    testdev_cmd_write(1);  // read data
+    c2_addr_write(i);
+    c2_cmd_write(2);  // send address
+    c2_cmd_write(1);  // read data
+    // wait for read completion, or error
     for (;;) {
-      uint8_t s = testdev_stat_read();
+      uint8_t s = c2_stat_read();
       if (s & 0x80) {
-        puts("  *** c.2 error\n\n");
-        return;
+        puts("\r\x1b[9B\n***** c.2 error ******");
+        return 0;
       }
       if (s & 0x40) break;
     }
-    buf[i-0x80] = testdev_rxbuf_read();
+    buf[i-0x80] = c2_rxbuf_read();
   }
 
   for (int i = 0x80; i < 0x100; i++) {
@@ -110,6 +112,22 @@ static void dump(void) {
     } else {
       putsnonl(" ");
     }
+  }
+  return 1;
+}
+
+static void livedump(void) {
+  for (;;) {
+    if (!dump()) {
+      break;
+    }
+    busy_wait(15);
+    if (readchar_nonblock()) {
+      // swallow the char that stopped the dump
+      readchar();
+      break;
+    }
+    putsnonl("\x1b[8A");
   }
 }
 
@@ -127,6 +145,8 @@ static void console_service(void)
 		reboot();
 	else if(strcmp(token, "dump") == 0)
 		dump();
+	else if(strcmp(token, "live") == 0)
+		livedump();
 	prompt();
 }
 

@@ -28,7 +28,7 @@ from litex.soc.cores.led import LedChaser
 from litedram.modules import MT41K64M16, MT41K128M16, MT41K256M16, MT41K512M16
 from litedram.phy import ECP5DDRPHY
 
-import testdev
+import c2
 
 # CRG ---------------------------------------------------------------------------------------------
 
@@ -211,8 +211,8 @@ class BaseSoC(SoCCore):
              Subsignal("c2d", Pins("GPIO:1"), IOStandard("LVCMOS33"))
              )
         ])
-        self.submodules.testdev = testdev.TestDevice(platform.request("c2"))
-        self.add_csr("testdev")
+        self.submodules.c2 = c2.C2Interface(platform.request("c2"))
+        self.add_csr("c2")
 
 # Build --------------------------------------------------------------------------------------------
 

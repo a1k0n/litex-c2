@@ -29,7 +29,7 @@ firmware.elf: $(OBJECTS) linker.ld
 	chmod -x $@
 
 %.o: %.c
-	$(compile)
+	$(compile) -O2
 
 %.o: %.S
 	$(assemble)

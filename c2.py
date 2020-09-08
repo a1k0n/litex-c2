@@ -2,7 +2,7 @@ from migen import Module, TSTriple, Array, Signal, Cat, FSM, If, NextState, Next
 from litex.soc.interconnect.csr import AutoCSR, CSRStorage, CSRStatus
 
 
-class TestDevice(Module, AutoCSR):
+class C2Interface(Module, AutoCSR):
     def __init__(self, c2):
 
         txwidth = 12
@@ -26,6 +26,9 @@ class TestDevice(Module, AutoCSR):
         self.comb += c2.c2ck.eq(c2ck)
         self.specials += c2d.get_tristate(c2.c2d)
 
+        # when rxbuf is read, reset the buffer full flag
+        self.sync += If(self._rxbuf.we, rfull.eq(0))
+
         fsm = FSM(reset_state="IDLE")
         self.submodules.fsm = fsm
 
@@ -39,7 +42,6 @@ class TestDevice(Module, AutoCSR):
                 NextValue(txlen, 5),
                 NextValue(rxlen, 8),
                 NextValue(error, 0),
-                NextValue(rfull, 0),  # can we reset this on the CSR read?
                 NextValue(waitlen, 40),
                 NextState("TX")
             ),
@@ -121,8 +123,9 @@ class TestDevice(Module, AutoCSR):
             )
         )
 
-
-        # write 1 to state to initiate read
+        # status register byte:
+        # |  7  |  6   | 5 | 4 |   3    |  2 |  1 |  0   |
+        # | ERR | RRDY | . | . | WAITRX | RX | TX | IDLE |
         self.comb += self._stat.status.eq(
             fsm.ongoing("IDLE") | 
             (fsm.ongoing("TX") << 1) |
@@ -141,5 +144,3 @@ class TestDevice(Module, AutoCSR):
         self.comb += self._txbuf.status.eq(txbuf)
         self.comb += self._rxlen.status.eq(rxlen)
         self.comb += self._waitlen.status.eq(waitlen)
-
-        # t.i, t.o, t.oe
