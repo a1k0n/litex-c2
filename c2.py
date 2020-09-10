@@ -5,7 +5,7 @@ from litex.soc.interconnect.csr import AutoCSR, CSRStorage, CSRStatus
 class C2Interface(Module, AutoCSR):
     def __init__(self, c2):
 
-        txwidth = 12
+        txwidth = 13
         txlen = Signal(max=txwidth+1)
         txbuf = Signal(txwidth)
         rxbuf = Signal(8)
@@ -13,13 +13,15 @@ class C2Interface(Module, AutoCSR):
 
         waitlen = Signal(7)
         rfull = Signal()
-        error = Signal()
+        readerror = Signal()
+
+        reset_count = Signal(max=961)
 
         self._cmd = CSRStorage(8)
         self._stat = CSRStatus(8)
         self._rxbuf = CSRStatus(8)
         self.comb += self._rxbuf.status.eq(rxbuf)
-        self._addr = CSRStorage(8)
+        self._txdat = CSRStorage(8)
 
         c2d = TSTriple()
         c2ck = Signal(reset=1)
@@ -37,23 +39,63 @@ class C2Interface(Module, AutoCSR):
             NextValue(c2ck, 1),
             If(self._cmd.storage == 1,  # data read
                 NextValue(self._cmd.storage, 0),
-                # write 00 (data read) 00 (length)
-                NextValue(txbuf, 0),
+                NextValue(txbuf, 1),  # start(1), data read (00), length (00)
                 NextValue(txlen, 5),
                 NextValue(rxlen, 8),
-                NextValue(error, 0),
-                NextValue(waitlen, 40),
+                NextValue(readerror, 0),
+                NextValue(waitlen, 127),
                 NextState("TX")
-            ),
-            If(self._cmd.storage == 2,  # address write
+            ).Elif(self._cmd.storage == 2,  # address write
                 NextValue(self._cmd.storage, 0),
-                NextValue(txbuf, (self._addr.storage << 3) | 7),
+                # start (1), address write (11), address
+                NextValue(txbuf, (self._txdat.storage << 3) | 7),
                 NextValue(txlen, 11),
                 NextValue(rxlen, 0),
-                NextValue(error, 0),
                 NextValue(waitlen, 0),
                 NextState("TX")
-            ),
+            ).Elif(self._cmd.storage == 3,  # address read
+                NextValue(self._cmd.storage, 0),
+                NextValue(waitlen, 0),
+                NextValue(txbuf, 5),  # start (1), address read (01)
+                NextValue(txlen, 3),
+                NextValue(waitlen, 0),  # no wait
+                NextValue(rxlen, 8),  # read 8 bits
+                NextValue(readerror, 0),
+                NextState("TX")
+            ).Elif(self._cmd.storage == 4,  # data write
+                NextValue(self._cmd.storage, 0),
+                NextValue(waitlen, 0),
+                # start (1), data write (10), length (00), data
+                NextValue(txbuf, (self._txdat.storage << 5) | 3),
+                NextValue(txlen, 13),
+                NextValue(waitlen, 127),  # wait at the end
+                NextValue(rxlen, 0),  # no read
+                NextState("TX")
+            ).Elif(self._cmd.storage == 5,  # reset
+                NextValue(self._cmd.storage, 0),
+                NextValue(reset_count, 960),  # 20us at 48MHz
+                NextValue(c2ck, 0),
+                NextState("RESET")
+            )
+        )
+
+        fsm.act("RESET",  # 20us reset line low
+            NextValue(c2ck, 0),
+            If(reset_count == 0,
+                NextValue(reset_count, 96),  # 2us at 48MHz
+                NextState("RESET2")
+            ).Else(
+                NextValue(reset_count, reset_count - 1),
+            )
+        )
+
+        fsm.act("RESET2",  # 2us reset line high
+            NextValue(c2ck, 1),
+            If(reset_count == 0,
+                NextState("IDLE")
+            ).Else(
+                NextValue(reset_count, reset_count - 1),
+            )
         )
 
         fsm.act("TX",
@@ -61,7 +103,7 @@ class C2Interface(Module, AutoCSR):
             c2d.oe.eq(1),
             If(txlen == 0,
                 If(waitlen != 0,
-                    NextState("WAITRX"),
+                    NextState("WAIT"),
                 ).Elif(rxlen != 0,
                     NextState("RX"),
                 ).Else(
@@ -80,15 +122,19 @@ class C2Interface(Module, AutoCSR):
             )
         )
 
-        fsm.act("WAITRX",
+        fsm.act("WAIT",
             # must enter state with c2ck already at 0
             c2d.oe.eq(0),
             If((c2ck == 1) & (c2d.i == 1),
-                NextState("RX"),
-                NextValue(c2ck, 0)
+                If(rxlen != 0,
+                    NextState("RX")
+                ).Else(
+                    NextState("STOP")
+                ),
+               NextValue(c2ck, 0)
             ).Else(
                 If(waitlen == 0,
-                    NextValue(error, 1),
+                    NextValue(readerror, 1),
                     NextState("IDLE")
                 ).Else(
                     NextValue(waitlen, waitlen - 1),
@@ -124,15 +170,15 @@ class C2Interface(Module, AutoCSR):
         )
 
         # status register byte:
-        # |  7  |  6   | 5 | 4 |   3    |  2 |  1 |  0   |
-        # | ERR | RRDY | . | . | WAITRX | RX | TX | IDLE |
+        # |  7  |  6   | 5 | 4 |  3   |  2 |  1 |  0   |
+        # | ERR | RRDY | . | . | WAIT | RX | TX | IDLE |
         self.comb += self._stat.status.eq(
             fsm.ongoing("IDLE") | 
             (fsm.ongoing("TX") << 1) |
             (fsm.ongoing("RX") << 2) |
-            (fsm.ongoing("WAITRX") << 3) | 
+            (fsm.ongoing("WAIT") << 3) | 
             (rfull << 6) |
-            (error << 7))
+            (readerror << 7))
         
         # for debugging, expose internals
         self._txlen = CSRStatus(5)
