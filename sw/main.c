@@ -7,6 +7,8 @@
 #include <console.h>
 #include <generated/csr.h>
 
+static void prompt(void) { printf("c2>"); }
+
 static char *readstr(void) {
   char        c[2];
   static char s[64];
@@ -23,16 +25,22 @@ static char *readstr(void) {
           putsnonl("\x08 \x08");
         }
         break;
-      case 3:  // ctrl-C
+      case 3:  // ctrl-C  -- abort command
         ptr = 0;
         s[0] = 0;
-        putsnonl("\n");
+        putsnonl("\r # \n");
         return s;
       case 0x15:  // ctrl-U
         ptr = 0;
         s[0] = 0;
         putsnonl("\r\x1b[K");
         return s;
+      case 12:  // ctrl-L  -- clear screen
+        putsnonl("\x1b[2J\x1b[H");
+        prompt();
+        s[ptr] = 0;
+        putsnonl(s);
+        break;
       case '\r':
       case '\n':
         s[ptr] = 0x00;
@@ -69,8 +77,6 @@ static char *get_token(char **str) {
   *str = c + 1;
   return d;
 }
-
-static void prompt(void) { printf("c2>"); }
 
 static void help(void) {
   puts("Available commands:");
@@ -191,7 +197,7 @@ static int poll_inbusy(void) {
 }
 
 static int poll_outready(void) {
-  for (int n = 1024; n > 0; n--) {
+  for (int n = 65536; n > 0; n--) {
     uint8_t st = c2_readaddr();
     if ((st & 3) == 1) {  // !inbusy & outready
       return 1;
@@ -205,9 +211,60 @@ static void init_fpctl(int wait) {
   reset_target();
   // FPCTL init sequance
   c2_writereg(2, 2);
-  // c2_writereg(2, 4);  // ?
+  // c2_writereg(2, 4);  // optional? halt core
   c2_writereg(2, 1);
   busy_wait(wait);  // wait _20 ms_?!
+}
+
+static int read_cmd5(uint8_t addr, uint8_t *b1, uint8_t *b2) {
+  uint8_t x;
+  c2_readreg(0xb4, &x);
+  c2_readdata(&x);
+  c2_readdata(&x);
+  c2_writedata(5);
+  if (!poll_outready()) {
+    return 0;
+  }
+  uint8_t stat;
+  if (!c2_readdata(&stat)) {
+    return 0;
+  }
+  if (stat != 0x0d) {
+    return 0;
+  }
+
+  c2_writedata(addr);
+  if (!poll_outready()) {
+    return 0;
+  }
+  if (!c2_readdata(b1)) {
+    return 0;
+  }
+  if (!poll_outready()) {
+    return 0;
+  }
+  if (!c2_readdata(b2)) {
+    return 0;
+  }
+  return 1;
+}
+
+static void dump_cmd5(void) {
+  uint8_t b1, b2;
+  for (int i = 0; i < 128; i++) {
+    int col = i&7;
+    if (!read_cmd5(i, &b1, &b2)) {
+      puts("cmd5 read error");
+      return;
+    }
+    if (col == 0) {
+      printf("%02x: ", i);
+    }
+    printf("%02x%02x ", b1, b2);
+    if (col == 7) {
+      puts("");
+    }
+  }
 }
 
 static int read_flash(uint16_t addr, int len) {
@@ -256,11 +313,9 @@ static int read_flash(uint16_t addr, int len) {
   return 1;
 }
 
-static int dump(void) {
+static int dump(uint8_t addr0) {
   uint8_t buf[0x80];
   char    sendbuf[0x40];
-
-  const uint8_t addr0 = 0x80;
 
   uint8_t addr = addr0;
   wait_ready();
@@ -325,9 +380,44 @@ dumperr:
   return 0;
 }
 
-static void livedump(void) {
+static void easteregg(void) {
+  init_fpctl(20);
+  char asciibuf[17];
+  memset(asciibuf, '.', 16);
+  asciibuf[16] = 0;
+  // accidentally discovered these registers!
+  c2_writereg(0xc7, 0);  // high 2 bits
+  c2_writereg(0xad, 0);  // low 8 bits
+
+  wait_ready();  // write address 0x84
+  c2_txdat_write(0x84);
+  c2_cmd_write(2);               // write address
+  for (int i = 0; i < 256*4; i++) {
+    int col = i & 15;
+    if (col == 0) {
+      printf("%03x: ", i);
+    }
+    uint8_t d;
+    if (!c2_readdata(&d)) {
+      puts(" --- read error ---");
+      break;
+    }
+    printf("%02x ", d);
+    if (d >= ' ' && d <= 0x7e) {
+      asciibuf[col] = d;
+    } else {
+      asciibuf[col] = '.';
+    }
+    if (col == 15) {
+      putsnonl("  ");
+      puts(asciibuf);
+    }
+  }
+}
+
+static void livedump(uint8_t addr0) {
   for (;;) {
-    if (!dump()) {
+    if (!dump(addr0)) {
       break;
     }
     busy_wait(15);
@@ -357,9 +447,15 @@ static void console_service(void) {
   } else if (strcmp(token, "reboot") == 0) {
     reboot();
   } else if (strcmp(token, "dump") == 0) {
-    dump();
+    dump(0x80);
+  } else if (strcmp(token, "dump0") == 0) {
+    dump(0);
+  } else if (strcmp(token, "cmd5") == 0) {
+    dump_cmd5();
   } else if (strcmp(token, "live") == 0) {
-    livedump();
+    livedump(0x80);
+  } else if (strcmp(token, "live0") == 0) {
+    livedump(0);
   } else if (strcmp(token, "reset") == 0) {
     uint8_t devid;
     reset_target();
@@ -378,6 +474,10 @@ static void console_service(void) {
         printf("\r%04x...", i);
       }
     }
+  } else if (strcmp(token, "easteregg") == 0) {
+    easteregg();
+  } else if (strcmp(token, "rf") == 0) {
+    read_flash(0x55aa, 1);
   } else if (strcmp(token, "getreg") == 0) {
     unsigned addr;
     uint8_t value = 0;
