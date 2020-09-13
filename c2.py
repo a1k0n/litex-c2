@@ -28,6 +28,32 @@ class C2Interface(Module, AutoCSR):
         self.comb += c2.c2ck.eq(c2ck)
         self.specials += c2d.get_tristate(c2.c2d)
 
+        self._pwcon = CSRStorage(8, reset=1)
+        self._glitchoff = CSRStorage(32)
+        self._glitchlen = CSRStorage(8)
+        glitchout = Signal()
+        glitchmode = Signal()
+        glitchtmr = Signal(32)
+        self.comb += c2.power.eq(self._pwcon.storage[0] & glitchout)
+        self.sync += If(self._pwcon.storage[1],
+            self._pwcon.storage[1].eq(0),
+            glitchmode.eq(0),
+            glitchtmr.eq(self._glitchoff.storage)
+        )
+        self.sync += If(glitchtmr == 0,
+            glitchout.eq(1)
+        ).Else(
+            glitchtmr.eq(glitchtmr - 1),
+            glitchout.eq(~glitchmode),
+            If(glitchtmr == 1,
+                If(glitchmode == 0,
+                    glitchtmr[:8].eq(self._glitchlen.storage),
+                    glitchmode.eq(1)
+                )
+            )
+        )
+
+
         # when rxbuf is read, reset the buffer full flag
         self.sync += If(self._rxbuf.we, rfull.eq(0))
 

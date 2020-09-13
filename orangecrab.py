@@ -208,7 +208,8 @@ class BaseSoC(SoCCore):
         platform.add_extension([
             ("c2", 0,
              Subsignal("c2ck", Pins("GPIO:0"), IOStandard("LVCMOS33")),
-             Subsignal("c2d", Pins("GPIO:1"), IOStandard("LVCMOS33"))
+             Subsignal("c2d", Pins("GPIO:1"), IOStandard("LVCMOS33")),
+             Subsignal("power", Pins("GPIO:13"), IOStandard("LVCMOS33"))
              )
         ])
         self.submodules.c2 = c2.C2Interface(platform.request("c2"))

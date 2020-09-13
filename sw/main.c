@@ -87,6 +87,8 @@ static void help(void) {
   puts("live                            - live dump of SFRs");
   puts("getreg <addr>                   - get value of SFR");
   puts("setreg <addr> <value>           - set value of SFR");
+  puts("dumpxram                        - dump XRAM contents");
+  puts("clearxram                       - clear XRAM to 0");
 }
 
 static void reboot(void) { ctrl_reset_write(1); }
@@ -267,6 +269,75 @@ static void dump_cmd5(void) {
   }
 }
 
+static void init_glitch(unsigned offset, uint8_t len) {
+  c2_glitchoff_write(offset);
+  c2_glitchlen_write(len);
+  c2_pwcon_write(3);
+}
+
+static int glitch_flash(unsigned glitchoffset, uint8_t glitchlen,
+                         uint16_t flashoffset) {
+  const int len = 256;
+  reset_target();
+  init_fpctl(20);
+
+  init_glitch(glitchoffset, glitchlen);
+  c2_writereg(0xb4, 6);  // fpdat <- 6 (block read)
+  // c2_writereg(0xb4, 0x0b);  // fpdat <- 0x0b (indirect read)
+  if (!poll_outready()) {
+    return 0;
+  }
+
+  uint8_t stat;
+  if (!c2_readdata(&stat)) {
+    return 0;
+  }
+
+  if (stat != 0x0d) {
+    return 0;
+  }
+  c2_writedata(flashoffset >> 8);
+  if (!poll_inbusy()) {
+    return 0;
+  }
+  c2_writedata(flashoffset & 0xff);
+  if (!poll_inbusy()) {
+    return 0;
+  }
+  c2_writedata(len & 0xff);  // length
+  if (!poll_outready()) {
+    return 0;
+  }
+  if (!c2_readdata(&stat)) {
+    return 0;
+  }
+  if (stat != 0x0d) {
+    return 0;
+  }
+
+  uint16_t addr = flashoffset;
+  for (int i = 0; i < len; i++) {
+    if (!poll_outready()) {
+      return 0;
+    }
+    c2_readdata(&stat);
+    printf("glitch(%d %d) %04x: %02x\n", addr, glitchlen, flashoffset,
+           stat);
+    addr++;
+  }
+
+  return 1;
+}
+
+static void gfsweep(int j) {
+  for (int i = 10; i < 3000; i++) {
+    if ((i % 10) == 0) {
+      printf("\roffset %d...", i);
+      glitch_flash(i, j, 0x0000);
+    }
+  }
+}
+
 static int read_flash(uint16_t addr, int len) {
   c2_writereg(0xb4, 6);  // fpdat <- 6 (block read)
   // c2_writereg(0xb4, 0x0b);  // fpdat <- 0x0b (indirect read)
@@ -380,7 +451,7 @@ dumperr:
   return 0;
 }
 
-static void easteregg(void) {
+static void dumpxram(void) {
   init_fpctl(20);
   char asciibuf[17];
   memset(asciibuf, '.', 16);
@@ -415,9 +486,29 @@ static void easteregg(void) {
   }
 }
 
-static void livedump(uint8_t addr0) {
+static void clearxram(void) {
+  // accidentally discovered these registers!
+  c2_writereg(0xc7, 0);  // high 2 bits
+  c2_writereg(0xad, 0);  // low 8 bits
+
+  wait_ready();  // write address 0x84
+  c2_txdat_write(0x84);
+  c2_cmd_write(2);               // write address
+  for (int i = 0; i < 256*4; i++) {
+    c2_writedata(0);
+  }
+}
+
+static void livedump(uint8_t addr0, int halt) {
   for (;;) {
-    if (!dump(addr0)) {
+    if (halt) {
+      c2_writereg(2, 4);
+    }
+    int ok = dump(addr0);
+    if (halt) {
+      c2_writereg(2, 0);
+    }
+    if (!ok) {
       break;
     }
     busy_wait(15);
@@ -453,9 +544,31 @@ static void console_service(void) {
   } else if (strcmp(token, "cmd5") == 0) {
     dump_cmd5();
   } else if (strcmp(token, "live") == 0) {
-    livedump(0x80);
-  } else if (strcmp(token, "live0") == 0) {
-    livedump(0);
+    livedump(0x80, 0);
+  } else if (strcmp(token, "liveh") == 0) {
+    livedump(0x80, 1);
+  } else if (strcmp(token, "on") == 0) {
+    c2_pwcon_write(1);
+  } else if (strcmp(token, "off") == 0) {
+    c2_pwcon_write(0);
+  } else if (strcmp(token, "glitch") == 0) {
+    unsigned offset, len;
+    token = get_token(&str);
+    offset = atoi(token);
+    token = get_token(&str);
+    len = atoi(token);
+    init_glitch(offset, len);
+  } else if (strcmp(token, "gfsweep") == 0) {  // glitch flash
+    token = get_token(&str);
+    int len = atoi(token);
+    gfsweep(len);
+  } else if (strcmp(token, "gf") == 0) {  // glitch flash
+    unsigned offset, len;
+    token = get_token(&str);
+    offset = atoi(token);
+    token = get_token(&str);
+    len = atoi(token);
+    glitch_flash(offset, len, 0x0000);
   } else if (strcmp(token, "reset") == 0) {
     uint8_t devid;
     reset_target();
@@ -463,6 +576,20 @@ static void console_service(void) {
       printf("target reset; device id %02x\n", devid);
     } else {
       printf("target reset; no response\n");
+    }
+  } else if (strcmp(token, "resethalt") == 0) {
+    token = get_token(&str);
+    unsigned wait = 0;
+    if (gethex(token, &wait)) {
+      reset_target();
+      while(wait > 0) wait--;
+      if (!c2_writereg(2, 4)) {
+        puts("target reset but no response to halt");
+      } else {
+        puts("target reset and halted");
+      }
+    } else {
+      puts("resethalt <delay>");
     }
   } else if (strcmp(token, "readaddr") == 0) {
     printf("c2 address: %02x\n", c2_readaddr());
@@ -474,8 +601,10 @@ static void console_service(void) {
         printf("\r%04x...", i);
       }
     }
-  } else if (strcmp(token, "easteregg") == 0) {
-    easteregg();
+  } else if (strcmp(token, "dumpxram") == 0) {
+    dumpxram();
+  } else if (strcmp(token, "clearxram") == 0) {
+    clearxram();
   } else if (strcmp(token, "rf") == 0) {
     read_flash(0x55aa, 1);
   } else if (strcmp(token, "getreg") == 0) {
